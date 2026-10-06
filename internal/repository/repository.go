@@ -201,7 +201,7 @@ func (m *Mutation) ClaimForCase(caseID string) (domain.CaseClaim, bool) {
 
 func (m *Mutation) ClaimConflict(caseID string, at time.Time) (domain.CaseClaim, bool) {
 	item, exists := m.ClaimForCase(caseID)
-	if !exists || !item.IsExpired(at) {
+	if !exists || !item.ActiveAt(at) {
 		return domain.CaseClaim{}, false
 	}
 	return item, true
@@ -230,6 +230,14 @@ func (m *Mutation) DeleteClaim(caseID, claimID string) error {
 	}
 	delete(m.claims, claimID)
 	return nil
+}
+
+func (m *Mutation) DeleteClaimsForCase(caseID string) {
+	for id, item := range m.claims {
+		if item.CaseID == caseID {
+			delete(m.claims, id)
+		}
+	}
 }
 
 func (m *Mutation) AppendMeasurement(item domain.Measurement) error {
@@ -337,7 +345,11 @@ func cloneCases(values map[string]domain.VerificationCase) map[string]domain.Ver
 }
 
 func cloneClaims(values map[string]domain.CaseClaim) map[string]domain.CaseClaim {
-	return values
+	result := make(map[string]domain.CaseClaim, len(values))
+	for key, value := range values {
+		result[key] = value
+	}
+	return result
 }
 
 func cloneMeasurements(values map[string][]domain.Measurement) map[string][]domain.Measurement {

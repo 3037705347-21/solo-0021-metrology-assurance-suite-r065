@@ -173,6 +173,7 @@ func (s *Service) ClaimCase(ctx context.Context, caseID string, input contracts.
 		if err != nil {
 			return err
 		}
+		m.DeleteClaimsForCase(item.ID)
 		if err := m.PutClaim(claim); err != nil {
 			return err
 		}
@@ -199,7 +200,7 @@ func (s *Service) ReleaseCase(ctx context.Context, caseID string, input contract
 	})
 }
 
-func (s *Service) consumeClaim(m *repository.Mutation, caseID, claimID string, revision int, at time.Time) error {
+func (s *Service) consumeClaim(m *repository.Mutation, caseID, claimID, actor string, revision int, at time.Time) error {
 	claimID = strings.TrimSpace(claimID)
 	if claimID == "" {
 		if claim, exists := m.ClaimForCase(caseID); exists && claim.ActiveAt(at) {
@@ -224,6 +225,14 @@ func (s *Service) consumeClaim(m *repository.Mutation, caseID, claimID string, r
 	if !claim.ActiveAt(at) {
 		return fmt.Errorf("%w: claim %s has expired", domain.ErrClaimConflict, claimID)
 	}
+	if claim.Holder != strings.TrimSpace(actor) {
+		return fmt.Errorf(
+			"%w: claim %s is held by %s",
+			domain.ErrClaimConflict,
+			claimID,
+			claim.Holder,
+		)
+	}
 	if claim.Revision != revision {
 		return fmt.Errorf(
 			"%w: claim %s targets revision %d",
@@ -243,7 +252,7 @@ func (s *Service) RecordMeasurement(ctx context.Context, caseID string, input co
 		if !exists {
 			return fmt.Errorf("%w: case %s", domain.ErrNotFound, id)
 		}
-		if err := s.consumeClaim(m, item.ID, input.ClaimID, item.Version, s.now()); err != nil {
+		if err := s.consumeClaim(m, item.ID, input.ClaimID, input.Technician, item.Version, s.now()); err != nil {
 			return err
 		}
 		measurement, err := domain.NewMeasurement(
@@ -301,7 +310,7 @@ func (s *Service) ReopenCase(ctx context.Context, caseID string, input contracts
 		if !exists {
 			return fmt.Errorf("%w: case %s", domain.ErrNotFound, id)
 		}
-		if err := s.consumeClaim(m, item.ID, input.ClaimID, item.Version, s.now()); err != nil {
+		if err := s.consumeClaim(m, item.ID, input.ClaimID, input.Actor, item.Version, s.now()); err != nil {
 			return err
 		}
 		if err := item.Reopen(s.now()); err != nil {
@@ -343,7 +352,7 @@ func (s *Service) SealCase(ctx context.Context, caseID string, input contracts.S
 		if !exists {
 			return fmt.Errorf("%w: case %s", domain.ErrNotFound, id)
 		}
-		if err := s.consumeClaim(m, item.ID, input.ClaimID, item.Version, s.now()); err != nil {
+		if err := s.consumeClaim(m, item.ID, input.ClaimID, input.Reviewer, item.Version, s.now()); err != nil {
 			return err
 		}
 		if _, exists := m.Seal(item.ID); exists {

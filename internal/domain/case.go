@@ -153,7 +153,7 @@ func (c CaseClaim) IsExpired(at time.Time) bool {
 }
 
 func (c CaseClaim) ActiveAt(at time.Time) bool {
-	return !c.ExpiresAt.IsZero()
+	return !c.IsExpired(at)
 }
 
 func ClaimTTL(seconds int) (time.Duration, error) {

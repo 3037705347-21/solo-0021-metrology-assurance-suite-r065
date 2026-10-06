@@ -40,6 +40,7 @@ func main() {
 		"record-measurement":       checkRecordMeasurement,
 		"reopen-verification-case": checkReopenVerificationCase,
 		"seal-verification":        checkSealVerification,
+		"claim-verification-case":  checkClaimVerificationCase,
 	}
 	run, ok := checks[*workflow]
 	if !ok {
@@ -375,6 +376,204 @@ func checkSealVerification() error {
 	return nil
 }
 
+func checkClaimVerificationCase() error {
+	h := newHarness()
+	defer h.close()
+
+	deviceID, err := h.createDevice("MET-1501")
+	if err != nil {
+		return err
+	}
+	opened, err := h.openCase(deviceID)
+	if err != nil {
+		return err
+	}
+	caseID, err := nestedString(opened.Body, "case", "id")
+	if err != nil {
+		return err
+	}
+
+	claim, err := h.claimCase(caseID, "Rui", 300)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(claim, http.StatusCreated); err != nil {
+		return err
+	}
+	claimID, err := nestedString(claim.Body, "claim", "id")
+	if err != nil {
+		return err
+	}
+
+	// A second claim while the first is active is rejected.
+	duplicate, err := h.claimCase(caseID, "Mira", 300)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(duplicate, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(duplicate, "claim_conflict"); err != nil {
+		return err
+	}
+
+	// Tokenless and foreign-token submissions are rejected while claimed.
+	tokenless, err := h.recordMeasurement(caseID, 26.5, "Rui")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(tokenless, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(tokenless, "claim_conflict"); err != nil {
+		return err
+	}
+	foreign, err := h.recordMeasurementWithClaim(caseID, 26.5, "Mira", claimID)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(foreign, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(foreign, "claim_conflict"); err != nil {
+		return err
+	}
+
+	// A failed submission must not consume the claim.
+	failed, err := h.request(http.MethodPost, "/cases/"+caseID+"/reopen", map[string]any{
+		"actor":    "Rui",
+		"reason":   "case is not in recheck",
+		"claim_id": claimID,
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(failed, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(failed, "state_conflict"); err != nil {
+		return err
+	}
+	retried, err := h.recordMeasurementWithClaim(caseID, 26.5, "Rui", claimID)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(retried, http.StatusCreated); err != nil {
+		return err
+	}
+	if _, claimed := retried.Body["claim"]; claimed {
+		return errors.New("claim is still attached after a successful submission")
+	}
+
+	// The consumed claim freed the case for the next handling step.
+	rework, err := h.claimCase(caseID, "Lin", 300)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(rework, http.StatusCreated); err != nil {
+		return err
+	}
+	reworkID, err := nestedString(rework.Body, "claim", "id")
+	if err != nil {
+		return err
+	}
+	reopened, err := h.request(http.MethodPost, "/cases/"+caseID+"/reopen", map[string]any{
+		"actor":    "Lin",
+		"reason":   "measurement setup was replaced",
+		"claim_id": reworkID,
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(reopened, http.StatusOK); err != nil {
+		return err
+	}
+
+	// An expired claim cannot submit and can be taken over safely.
+	short, err := h.claimCase(caseID, "Rui", 1)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(short, http.StatusCreated); err != nil {
+		return err
+	}
+	shortID, err := nestedString(short.Body, "claim", "id")
+	if err != nil {
+		return err
+	}
+	blocked, err := h.claimCase(caseID, "Mira", 60)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(blocked, http.StatusConflict); err != nil {
+		return err
+	}
+	time.Sleep(1200 * time.Millisecond)
+	expired, err := h.recordMeasurementWithClaim(caseID, 25.2, "Rui", shortID)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(expired, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(expired, "claim_conflict"); err != nil {
+		return err
+	}
+	takeover, err := h.claimCase(caseID, "Mira", 300)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(takeover, http.StatusCreated); err != nil {
+		return err
+	}
+	takeoverID, err := nestedString(takeover.Body, "claim", "id")
+	if err != nil {
+		return err
+	}
+	accepted, err := h.recordMeasurementWithClaim(caseID, 25.2, "Mira", takeoverID)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(accepted, http.StatusCreated); err != nil {
+		return err
+	}
+
+	// The seal step consumes its claim and closes the claim cycle.
+	review, err := h.claimCase(caseID, "Vera", 300)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(review, http.StatusCreated); err != nil {
+		return err
+	}
+	reviewID, err := nestedString(review.Body, "claim", "id")
+	if err != nil {
+		return err
+	}
+	sealed, err := h.request(http.MethodPost, "/cases/"+caseID+"/seal", map[string]any{
+		"reviewer": "Vera",
+		"summary":  "accepted measurement sealed for review",
+		"claim_id": reviewID,
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(sealed, http.StatusCreated); err != nil {
+		return err
+	}
+	if _, claimed := sealed.Body["claim"]; claimed {
+		return errors.New("claim is still attached after sealing")
+	}
+	afterSeal, err := h.claimCase(caseID, "Mira", 60)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(afterSeal, http.StatusConflict); err != nil {
+		return err
+	}
+	return expectErrorCode(afterSeal, "state_conflict")
+}
+
 func newHarness() *harness {
 	server := httptest.NewServer(bootstrap.NewHandler())
 	return &harness{
@@ -460,6 +659,21 @@ func (h *harness) recordMeasurement(caseID string, observed float64, technician 
 	return h.request(http.MethodPost, "/cases/"+caseID+"/measurements", map[string]any{
 		"observed":   observed,
 		"technician": technician,
+	})
+}
+
+func (h *harness) recordMeasurementWithClaim(caseID string, observed float64, technician, claimID string) (apiResponse, error) {
+	return h.request(http.MethodPost, "/cases/"+caseID+"/measurements", map[string]any{
+		"observed":   observed,
+		"technician": technician,
+		"claim_id":   claimID,
+	})
+}
+
+func (h *harness) claimCase(caseID, holder string, ttlSeconds int) (apiResponse, error) {
+	return h.request(http.MethodPost, "/cases/"+caseID+"/claim", map[string]any{
+		"holder":      holder,
+		"ttl_seconds": ttlSeconds,
 	})
 }
 
